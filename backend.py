@@ -21,7 +21,16 @@ MONGODB_URI = os.getenv("MONGODB_URI", "")
 MONGODB_DB = os.getenv("MONGODB_DB", "armadietto_iot")
 DEFAULT_DEVICE_ID = os.getenv("DEFAULT_DEVICE_ID", "armadietto01")
 
-mongo_client = MongoClient(MONGODB_URI)
+print("[DEBUG] MQTT_HOST =", MQTT_HOST)
+print("[DEBUG] MQTT_PORT =", MQTT_PORT)
+print("[DEBUG] MQTT_USERNAME =", MQTT_USERNAME)
+print("[DEBUG] MQTT_PASSWORD_LEN =", len(MQTT_PASSWORD))
+print("[DEBUG] MQTT_TOPIC_FILTER =", MQTT_TOPIC_FILTER)
+
+# =========================================================
+# MongoDB
+# =========================================================
+mongo_client = MongoClient(MONGODB_URI, tz_aware=True)
 db = mongo_client[MONGODB_DB]
 
 RAW_COLLECTION = "mqtt_raw"
@@ -80,11 +89,15 @@ def serialize_doc(doc):
         if k == "_id":
             out[k] = str(v)
         elif isinstance(v, datetime):
+            if v.tzinfo is None:
+                v = v.replace(tzinfo=timezone.utc)
             out[k] = v.isoformat()
         elif isinstance(v, dict):
             out[k] = {}
             for kk, vv in v.items():
                 if isinstance(vv, datetime):
+                    if vv.tzinfo is None:
+                        vv = vv.replace(tzinfo=timezone.utc)
                     out[k][kk] = vv.isoformat()
                 else:
                     out[k][kk] = vv
@@ -176,13 +189,19 @@ def handle_sensors(device_id: str, payload: dict):
 
 def on_connect(client, userdata, flags, reason_code, properties):
     print(f"[MQTT] Connected: {reason_code}")
-    client.subscribe(MQTT_TOPIC_FILTER)
-    print(f"[MQTT] Subscribed to: {MQTT_TOPIC_FILTER}")
+
+    if reason_code == 0:
+        client.subscribe(MQTT_TOPIC_FILTER)
+        print(f"[MQTT] Subscribed to: {MQTT_TOPIC_FILTER}")
+    else:
+        print("[MQTT] Connessione NON riuscita")
 
 
 def on_message(client, userdata, msg):
     topic = msg.topic
     payload_text = msg.payload.decode("utf-8", errors="replace").strip()
+
+    print(f"[MQTT] {topic} -> {payload_text}")
 
     device_id, channel = parse_topic(topic)
     if not device_id or not channel:
@@ -194,20 +213,25 @@ def on_message(client, userdata, msg):
     except json.JSONDecodeError:
         payload_json = {"raw": payload_text}
 
-    print(f"[MQTT] {topic} -> {payload_text}")
-    save_raw(topic, payload_text, payload_json)
+    try:
+        save_raw(topic, payload_text, payload_json)
 
-    if not isinstance(payload_json, dict):
-        return
+        if not isinstance(payload_json, dict):
+            return
 
-    if channel == "status":
-        handle_status(device_id, payload_json)
-    elif channel == "events":
-        handle_event(device_id, payload_json)
-    elif channel == "rfid":
-        handle_rfid(device_id, payload_json)
-    elif channel == "sensors":
-        handle_sensors(device_id, payload_json)
+        if channel == "status":
+            handle_status(device_id, payload_json)
+        elif channel == "events":
+            handle_event(device_id, payload_json)
+        elif channel == "rfid":
+            handle_rfid(device_id, payload_json)
+        elif channel == "sensors":
+            handle_sensors(device_id, payload_json)
+
+        print("[MongoDB] Salvataggio OK")
+
+    except Exception as e:
+        print(f"[MongoDB] ERRORE salvataggio: {e}")
 
 
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="backend-armadietto")
@@ -217,15 +241,32 @@ mqtt_client.on_message = on_message
 if MQTT_USERNAME:
     mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 
-# HiveMQ Cloud usa TLS sulla porta 8883
 mqtt_client.tls_set()
 
 
 @app.on_event("startup")
 def startup_event():
-    ensure_collections()
-    mqtt_client.connect(MQTT_HOST, MQTT_PORT, 60)
-    mqtt_client.loop_start()
+    print("[APP] Avvio backend...")
+
+    try:
+        mongo_client.admin.command("ping")
+        print("[MongoDB] Ping OK")
+    except Exception as e:
+        print(f"[MongoDB] ERRORE ping: {e}")
+
+    try:
+        ensure_collections()
+        print("[MongoDB] Collections OK")
+    except Exception as e:
+        print(f"[MongoDB] ERRORE collections: {e}")
+
+    try:
+        mqtt_client.connect(MQTT_HOST, MQTT_PORT, 60)
+        mqtt_client.loop_start()
+        print("[MQTT] connect() chiamato")
+    except Exception as e:
+        print(f"[MQTT] ERRORE connect: {e}")
+
     print("[APP] Backend avviato")
 
 
